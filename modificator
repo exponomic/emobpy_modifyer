@@ -1,0 +1,81 @@
+import pandas as pd
+import os
+
+# Pfade für Input- und Output-Ordner
+input_folder = '/Users/florianliebenguth/Desktop/Programming/EV_Modifyer/Input_Mod'
+output_folder = '/Users/florianliebenguth/Desktop/Programming/EV_Modifyer/Output_Mod'
+
+# Maximales Limit für die Werte in der neuen Spalte
+max_value = 2.5
+
+# Datei laden
+file_path = '/mnt/data/EV_emobpy.csv'
+df = pd.read_csv(file_path, delimiter=";", header=None, decimal=",")
+
+# Umwandlung der ersten Spalte in Datetime, inkl. Sekunden (falls vorhanden)
+df[0] = pd.to_datetime(df[0], format='%d.%m.%Y %H:%M:%S', errors='coerce')
+
+# Prüfen, ob die Konvertierung erfolgreich war, und falls nicht, den Fehler ausgeben
+if df[0].isnull().any():
+    print(f"Fehler bei der Konvertierung der Datums-/Zeitangaben")
+
+# Neue Spalte einfügen mit "HT" für Zeiträume zwischen 07:00-09:00 und 17:00-20:00 Uhr
+df['Tariff'] = df[0].apply(lambda x: "HT" if (7 <= x.hour < 9) or (17 <= x.hour < 20) else "")
+
+# Bearbeite jede Spalte ab der zweiten Spalte (Leistungswerte für Wallboxen)
+for col in df.columns[1:-1]:  # Spalten ab der zweiten bis zur vorletzten Spalte (außer "Tariff")
+    # Liste der HT-Werte sammeln und nach der HT-Phase verschieben
+    ht_values = []
+    shifted_col = f'Shifted_{col}'
+    df[shifted_col] = ""
+
+    for idx, row in df.iterrows():
+        if row['Tariff'] == "HT":
+            ht_values.append(row[col])  # Speichere den Wert der Wallbox-Spalte
+
+        # Wenn die HT-Phase endet, füge die verbleibenden Werte ein
+        elif ht_values and (row['Tariff'] != "HT"):
+            ht_values = [v for v in ht_values if v > 0]  # Entferne führende Nullen
+
+            for i, value in enumerate(ht_values):
+                if idx + i < len(df):
+                    df.at[idx + i, shifted_col] = value
+            ht_values = []  # Leere die Liste für die nächste HT-Phase
+
+    # Stelle sicher, dass die Spalten numerisch sind
+    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    df[shifted_col] = pd.to_numeric(df[shifted_col], errors='coerce').fillna(0)
+
+    # Berechne die Summe und erzeuge die "Limited_Sum" Spalte
+    df[f'Sum_{col}'] = df[col] + df[shifted_col]
+    df[f'Limited_Sum_{col}'] = df[f'Sum_{col}'].copy()
+
+    # Begrenze die Werte und verteile die Differenz degressiv
+    for idx in range(len(df)):
+        if df.at[idx, f'Limited_Sum_{col}'] > max_value:
+            excess = df.at[idx, f'Limited_Sum_{col}'] - max_value
+            df.at[idx, f'Limited_Sum_{col}'] = max_value
+            for offset in range(1, len(df) - idx):
+                if excess <= 0:
+                    break
+                next_idx = idx + offset
+                available_space = max_value - df.at[next_idx, f'Limited_Sum_{col}']
+                if available_space > 0:
+                    addition = min(available_space, excess)
+                    df.at[next_idx, f'Limited_Sum_{col}'] += addition
+                    excess -= addition
+
+# Lösche alle Spalten außer der ersten (Datum) und den "Limited_Sum" Spalten
+limited_sum_cols = [col for col in df.columns if col.startswith('Limited_Sum')]
+df = df[[0] + limited_sum_cols]
+
+# Ausgabe der Summen im Terminal
+for col in limited_sum_cols:
+    total_sum = df[col].sum()
+    print(f"Die Summe der Spalte {col} beträgt: {total_sum}")
+
+# Modifizierte Datei speichern
+output_file_path = '/mnt/data/EV_emobpy_modified.csv'
+df.to_csv(output_file_path, sep=';', index=False, header=False, decimal=",")
+
+print(f'Datei wurde erfolgreich modifiziert und gespeichert unter: {output_file_path}')
